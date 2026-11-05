@@ -17,9 +17,22 @@ xcrun swiftc -swift-version 5 -framework AppKit -framework ApplicationServices \
   app/FocusTracking.swift app/InputCounterGuard.swift app/tests/FocusPolicyChecks.swift \
   -o app/build/focus-policy-checks
 app/build/focus-policy-checks
+xcrun swiftc -swift-version 5 -framework AppKit \
+  app/ClipboardSnapshot.swift app/tests/ClipboardChecks.swift -o app/build/clipboard-checks
+app/build/clipboard-checks
+xcrun swiftc -swift-version 5 \
+  app/RecordingLifecycle.swift app/tests/RecordingLifecycleChecks.swift -o app/build/recording-lifecycle-checks
+app/build/recording-lifecycle-checks
+xcrun swiftc -swift-version 5 \
+  app/WorkerPipe.swift app/tests/WorkerPipeChecks.swift -o app/build/worker-pipe-checks
+app/build/worker-pipe-checks
+xcrun swiftc -swift-version 5 \
+  app/SingleInstance.swift app/tests/SingleInstanceChecks.swift -o app/build/single-instance-checks
+app/build/single-instance-checks
 xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx14.0 \
   -framework AppKit -framework AVFoundation -framework ApplicationServices -framework Carbon \
-  app/DictationHUD.swift app/FocusTracking.swift app/InputCounterGuard.swift app/GigaFlow.swift \
+  app/DictationHUD.swift app/FocusTracking.swift app/InputCounterGuard.swift app/ClipboardSnapshot.swift \
+  app/RecordingLifecycle.swift app/WorkerPipe.swift app/SingleInstance.swift app/GigaFlow.swift \
   -o app/build/GigaFlow-compile-check
 plutil -lint app/Info.plist
 printf 'Checks passed. No microphone, model, signing identity or live app used.\n'

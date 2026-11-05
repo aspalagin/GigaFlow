@@ -26,12 +26,12 @@ GIGAFLOW_TEST_PYTHON="$HOME/Developer/gigaam-pilot/.venv/bin/python" bash script
 bash scripts/build-release.sh
 ```
 
-Для версии `0.3.0` результат находится в:
+Для версии `0.3.1` результат находится в:
 
 ```text
-dist/GigaFlow-0.3.0-arm64.dmg
+dist/GigaFlow-0.3.1-arm64.dmg
 dist/SHA256SUMS.txt
-dist/release-0.3.0/image/GigaFlow.app
+dist/release-0.3.1/image/GigaFlow.app
 ```
 
 Скрипт не перезаписывает уже существующий результат релиза. Для повторной сборки переместите предыдущие файлы из `dist` в отдельную папку.
@@ -67,7 +67,7 @@ GIGAFLOW_BUNDLED_RUNTIME="$PWD/dist/prepared-runtime" bash scripts/build-release
 Проверка путей без запуска модели:
 
 ```sh
-"dist/release-0.3.0/image/GigaFlow.app/Contents/MacOS/GigaFlow" --runtime-info
+"dist/release-0.3.1/image/GigaFlow.app/Contents/MacOS/GigaFlow" --runtime-info
 ```
 
 Не публикуйте результаты проверок с абсолютными путями пользователя. В Release notes указывайте только выполненные проверки и фактические ограничения.

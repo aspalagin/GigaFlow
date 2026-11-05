@@ -23,10 +23,11 @@ final class Recognizer {
     private var process: Process?
     private var input: Pipe?
     private var generation = UUID()
+    private var failureReported = false
     private let queue = DispatchQueue(label: "GigaFlow.worker-output")
     func start(audioDir: URL) {
         stop()
-        let token = UUID(); generation = token
+        let token = UUID(); generation = token; failureReported = false
         let child = Process(), stdin = Pipe(), stdout = Pipe()
         child.executableURL = runtimePython
         child.arguments = ["-I", "-B", "-u", Bundle.main.resourceURL!.appendingPathComponent("worker.py").path,
@@ -44,13 +45,14 @@ final class Recognizer {
         // Diagnostics only; the worker never logs transcripts or audio.
         let logDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/GigaFlow")
         try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
-        let log = logDir.appendingPathComponent("worker.log")
+        let log = selfTesting ? audioDir.appendingPathComponent("self-test-worker.log") : logDir.appendingPathComponent("worker.log")
         FileManager.default.createFile(atPath: log.path, contents: nil)
         child.standardError = try? FileHandle(forWritingTo: log)
         process = child; input = stdin
         child.terminationHandler = { [weak self] p in
             DispatchQueue.main.async {
-                guard let self = self, self.generation == token else { return }
+                guard let self = self, self.generation == token, !self.failureReported else { return }
+                self.failureReported = true
                 self.onEvent?(["type": "fatal", "message": "Распознавание остановилось (код \(p.terminationStatus)). Нажмите «Перезапустить модель»."])
             }
         }
@@ -68,12 +70,20 @@ final class Recognizer {
                         guard let event = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { continue }
                         DispatchQueue.main.async {
                             guard let self = self, self.generation == token else { return }
+                            let isFatal = event["type"] as? String == "fatal"
+                            // A late buffered ready event cannot revive a worker
+                            // whose termination callback has already been handled.
+                            guard !self.failureReported || isFatal else { return }
+                            if isFatal { self.failureReported = true }
                             self.onEvent?(event)
                         }
                     }
                 }
             }
-        } catch { onEvent?(["type": "fatal", "message": "Не удалось запустить модель: \(error.localizedDescription)"]) }
+        } catch {
+            failureReported = true
+            onEvent?(["type": "fatal", "message": "Не удалось запустить модель: \(error.localizedDescription)"])
+        }
     }
     func transcribe(_ url: URL, id: String) throws {
         guard let process = process, process.isRunning, let input = input else {
@@ -81,7 +91,7 @@ final class Recognizer {
         }
         var data = try JSONSerialization.data(withJSONObject: ["type": "transcribe", "id": id, "path": url.path])
         data.append(10)
-        try input.fileHandleForWriting.write(contentsOf: data)
+        try WorkerPipe.write(data, to: input.fileHandleForWriting)
     }
     func stop() {
         generation = UUID()
@@ -91,36 +101,8 @@ final class Recognizer {
     }
 }
 
-struct ClipboardSnapshot {
-    let items: [[NSPasteboard.PasteboardType: Data]]
-    static func capture(_ board: NSPasteboard) -> ClipboardSnapshot? {
-        var result = [[NSPasteboard.PasteboardType: Data]](), count = 0
-        for item in board.pasteboardItems ?? [] {
-            var values = [NSPasteboard.PasteboardType: Data]()
-            for type in item.types {
-                guard let data = item.data(forType: type) else { continue }
-                count += data.count
-                if count > 16 * 1024 * 1024 { return nil }
-                values[type] = data
-            }
-            result.append(values)
-        }
-        return ClipboardSnapshot(items: result)
-    }
-    func restore(_ board: NSPasteboard, ifUnchanged count: Int) {
-        guard board.changeCount == count else { return }
-        let objects = items.map { values -> NSPasteboardItem in
-            let item = NSPasteboardItem()
-            for (type, data) in values { item.setData(data, forType: type) }
-            return item
-        }
-        board.clearContents()
-        if !objects.isEmpty { board.writeObjects(objects) }
-    }
-}
-
 final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegate {
-    enum Mode { case loading, ready, recording, processing, failed }
+    typealias Mode = RecordingMode
     var mode: Mode = .loading
     let recognizer = Recognizer()
     var statusItem: NSStatusItem!
@@ -137,7 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
     var audioDir: URL!
     var timer: Timer?, deadline: DispatchWorkItem?
     var hud: NSPanel!, hudView: DictationHUDView!
-    var hudMessage = ""
+    var hudGeneration = UUID()
     var setup: NSWindow?, setupStatus: NSTextField?, micButton: NSButton?, axButton: NSButton?
     var resultWindow: NSWindow?
     var pasteRestore: (() -> Void)?
@@ -161,14 +143,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
         do { try FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true,
                                                      attributes: [.posixPermissions: 0o700]) }
         catch { fatalError("Cannot create private audio directory: \(error)") }
+        recognizer.onEvent = { [weak self] event in self?.workerEvent(event) }
+        // Diagnostics use a private pasteboard and public sample only. They must
+        // never receive the running application's mouse or keyboard commands.
+        if selfTesting { runSelfTest(); return }
         buildMenu(); buildHUD(); registerHotKey()
         let center = DistributedNotificationCenter.default()
         center.addObserver(self, selector: #selector(bridgeStart), name: .init("local.arseniy.gigaflow.start"), object: "org.hammerspoon.Hammerspoon", suspensionBehavior: .deliverImmediately)
         center.addObserver(self, selector: #selector(bridgeStop), name: .init("local.arseniy.gigaflow.stop"), object: "org.hammerspoon.Hammerspoon", suspensionBehavior: .deliverImmediately)
         center.addObserver(self, selector: #selector(bridgePing), name: .init("local.arseniy.gigaflow.ping"), object: "org.hammerspoon.Hammerspoon", suspensionBehavior: .deliverImmediately)
         center.addObserver(self, selector: #selector(bridgeToggle), name: .init("local.arseniy.gigaflow.toggle"), object: "org.hammerspoon.Hammerspoon", suspensionBehavior: .deliverImmediately)
-        recognizer.onEvent = { [weak self] event in self?.workerEvent(event) }
-        if selfTesting { runSelfTest(); return }
         installInteractionMonitoring()
         startRecognizer()
         timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.tick() }
@@ -283,7 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
     }
 
     func showHUD(_ text: String, seconds: Double? = nil) {
-        hudMessage = text
+        let generation = UUID(); hudGeneration = generation
         let state = mode == .recording ? "recording" : mode == .processing ? "processing" : text == "Готово" ? "success" : mode == .failed ? "error" : "info"
         hudView.update(state: state, message: text)
         hud.setContentSize(hudView.preferredSize)
@@ -293,7 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
         if let seconds = seconds {
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
                 guard let self = self, self.mode != .recording, self.mode != .processing else { return }
-                if self.hudMessage == text { self.hud.orderOut(nil) }
+                if self.hudGeneration == generation { self.hud.orderOut(nil) }
             }
         }
     }
@@ -342,6 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
     }
 
     @objc func toggleRecording() {
+        guard !selfTesting else { return }
         if mode == .recording { finishRecording() }
         else if mode == .ready { startRecording() }
         else if mode == .loading { showHUD("Модель ещё готовится…", seconds: 2) }
@@ -355,14 +340,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
             message = "Нужно разрешение на микрофон"; refresh(); showSetup(nil); return
         }
         guard AVCaptureDevice.default(for: .audio) != nil else {
-            showHUD("Нет аудиовхода. Подключите микрофон.", seconds: 4); return
+            outcome = "error"; message = "Нет аудиовхода. Подключите микрофон."
+            showHUD(message, seconds: 4); refresh(); return
         }
         dictationAuditID = UUID().uuidString
         inputCounterGuard.beginCapture()
         target = InputTarget.capture(interactionSerial: interactionSerial)
         if !interactionMonitoringAvailable && target?.element == nil { target = nil }
-        FocusAudit.record(event: "recording_start", details: ["requestID": dictationAuditID,
-            "target": target?.metadata() ?? InputTarget.diagnoseCurrent(), "interactionSerial": interactionSerial])
         let url = audioDir.appendingPathComponent("\(UUID().uuidString).wav")
         let settings: [String: Any] = [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16000,
             AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false,
@@ -375,30 +359,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
             }
             recorder = r; recordingURL = url; recordingStarted = ProcessInfo.processInfo.systemUptime
             mode = .recording; outcome = "recording"; message = "Идёт запись"
+            FocusAudit.record(event: "recording_start", details: ["requestID": dictationAuditID,
+                "target": target?.metadata() ?? InputTarget.diagnoseCurrent(), "interactionSerial": interactionSerial])
             showHUD("Запись · нажмите горячую клавишу ещё раз"); refresh()
         } catch {
             try? FileManager.default.removeItem(at: url)
-            showHUD("Ошибка микрофона: \(error.localizedDescription)", seconds: 5)
+            target = nil; outcome = "error"; message = "Ошибка микрофона: \(error.localizedDescription)"
+            FocusAudit.record(event: "recording_failed", details: ["requestID": dictationAuditID,
+                "reason": "audio_recording_failed"])
+            showHUD(message, seconds: 5); refresh()
         }
     }
 
     func finishRecording() {
         guard mode == .recording, let recorder = recorder, let url = recordingURL else { return }
         let duration = max(recorder.currentTime, ProcessInfo.processInfo.systemUptime - recordingStarted)
+        // AX diagnostics may wait for another app. Stop the microphone first.
+        mode = .processing; outcome = "processing"; recorder.stop(); self.recorder = nil
         FocusAudit.record(event: "recording_stop", details: ["requestID": dictationAuditID,
             "current": InputTarget.diagnoseCurrent(), "interactionSerial": interactionSerial])
-        mode = .processing; outcome = "processing"; recorder.stop(); self.recorder = nil
-        if duration < 0.25 { resetAudio(); mode = .ready; message = readyMessage; hud.orderOut(nil); refresh(); return }
+        if duration < 0.25 {
+            resetAudio(); target = nil; mode = .ready; outcome = "too_short"; message = readyMessage
+            FocusAudit.record(event: "recording_discarded", details: ["requestID": dictationAuditID,
+                "reason": "too_short", "durationSeconds": duration])
+            hud.orderOut(nil); refresh(); return
+        }
         let id = UUID().uuidString; requestID = id
         message = "Распознаю…"; showHUD(message); refresh()
-        do { try recognizer.transcribe(url, id: id) }
-        catch { failRequest(error.localizedDescription) }
         let timeout = DispatchWorkItem { [weak self] in
             guard let self = self, self.requestID == id else { return }
             self.recognizer.stop(); self.ready = false
             self.failRequest("Распознавание не ответило. Перезапустите модель из меню.")
         }
         deadline = timeout; DispatchQueue.main.asyncAfter(deadline: .now() + 90, execute: timeout)
+        do { try recognizer.transcribe(url, id: id) }
+        catch {
+            recognizer.stop(); ready = false
+            failRequest("Не удалось передать запись модели. Перезапустите её из меню.")
+        }
     }
 
     func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
@@ -420,12 +418,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
     @objc func cancelRecording() {
         insertionGeneration = UUID()
         let wasProcessing = mode == .processing
-        mode = ready ? .ready : .loading
+        let preserveWorkerMessage = mode == .loading || mode == .failed
+        mode = RecordingLifecycle.stateAfterCancellation(mode, workerReady: ready)
         recorder?.stop(); recorder = nil
         resetAudio(); target = nil
-        outcome = "cancelled"; message = "Отменено"; hud.orderOut(nil); refresh()
+        if !preserveWorkerMessage {
+            outcome = "cancelled"
+            message = ready ? "Отменено" : "Модель недоступна. Перезапустите её из меню."
+        }
+        hud.orderOut(nil); refresh()
         // Ignore the result by UUID; worker remains loaded for the next recording.
-        if wasProcessing { message = "Отменено · модель завершает текущий запрос"; refresh() }
+        if wasProcessing && ready { message = "Отменено · модель завершает текущий запрос"; refresh() }
     }
     func failRequest(_ text: String) {
         resetAudio(); target = nil; mode = ready ? .ready : .failed
@@ -438,11 +441,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
             startupDeadline?.cancel(); startupDeadline = nil
             ready = true; mode = .ready; message = readyMessage; refresh()
             if selfTesting {
-                try? recognizer.transcribe(audioDir.appendingPathComponent("official-example.wav"), id: "875b091e-5927-4d93-bbfd-27dc7776b29a")
+                do { try recognizer.transcribe(audioDir.appendingPathComponent("official-example.wav"), id: "875b091e-5927-4d93-bbfd-27dc7776b29a") }
+                catch { print("SELFTEST FAIL: worker write failed"); finishSelfTest(1) }
             }
         } else if type == "fatal" {
             startupDeadline?.cancel(); startupDeadline = nil
-            if selfTesting { print("SELFTEST FAIL: \(event)"); exit(1) }
+            if selfTesting { print("SELFTEST FAIL: \(event)"); finishSelfTest(1) }
             ready = false
             recorder?.stop(); recorder = nil
             failRequest(event["message"] as? String ?? "Ошибка модели")
@@ -450,7 +454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
             let expected = "Ничьих не требуя похвал, Счастлив уж я надеждой сладкой, Что дева с трепетом любви Посмотрит, может быть, украдкой На песни грешные мои. У лукоморья дуб зелёный."
             let ok = (event["text"] as? String) == expected
             print("SELFTEST \(ok ? "PASS" : "FAIL"): native app → persistent MLX worker → exact reference; elapsed=\(event["elapsed"] ?? "?")")
-            recognizer.stop(); exit(ok ? 0 : 1)
+            finishSelfTest(ok ? 0 : 1)
         } else if let id = event["id"] as? String, id == requestID {
             if type == "error" { failRequest(event["message"] as? String ?? "Ошибка распознавания"); return }
             guard type == "result" else { return }
@@ -488,33 +492,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
             } else { outcome = "copy_available"; message = "Текст готов — отпустите клавиши и скопируйте его через меню"; showHUD(message, seconds: 5); refresh() }
             return
         }
+        // Bracket all potentially blocking preparation, even for a known AX
+        // element. Main-thread event callbacks may still be queued behind it.
+        let preparationInput = InputEventCounts.current()
         pasteRestore?(); pasteRestore = nil
         let board = NSPasteboard.general
         guard let snapshot = ClipboardSnapshot.capture(board) else {
+            guard token == insertionGeneration, mode == .ready else { return }
+            FocusAudit.record(event: "paste_blocked", details: ["requestID": dictationAuditID,
+                "reason": "clipboard_snapshot_unavailable"])
             outcome = "copy_available"; message = "Текст готов. Скопируйте его через меню GigaFlow."; showHUD(message, seconds: 5); refresh(); return
         }
         guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: false) else { return }
+              let up = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: false) else {
+            outcome = "copy_available"; message = "Не удалось отправить вставку. Текст доступен в меню."
+            showHUD(message, seconds: 5); refresh(); return
+        }
         let finalFocusReason = target.checkCurrent(interactionSerial: interactionSerial)
             ?? (target.element == nil ? inputCounterGuard.rejection() : nil)
-        guard finalFocusReason == nil, token == insertionGeneration else {
+            ?? (InputEventCounts.current() == preparationInput ? nil : "user_input_during_paste")
+        guard token == insertionGeneration, mode == .ready else { return }
+        guard finalFocusReason == nil else {
             outcome = "copy_available"
             FocusAudit.record(event: "paste_blocked", details: ["requestID": dictationAuditID,
-                "reason": finalFocusReason ?? "superseded",
+                "reason": finalFocusReason ?? "focus_unavailable",
                 "target": target.metadata(), "current": InputTarget.diagnoseCurrent(), "interactionSerial": interactionSerial])
             message = "Фокус изменился. Текст доступен для копирования в меню."; showHUD(message, seconds: 5); refresh(); return
         }
-        board.clearContents(); board.setString(text, forType: .string)
-        let count = board.changeCount
+        // The capture generation is checked again immediately before replacing
+        // it. A failed write restores only the generation still owned by us.
+        guard let count = snapshot.writeTemporaryText(text, to: board) else {
+            guard token == insertionGeneration, mode == .ready else { return }
+            outcome = "copy_available"
+            FocusAudit.record(event: "paste_blocked", details: ["requestID": dictationAuditID,
+                "reason": "clipboard_changed_or_write_failed"])
+            message = "Не удалось подготовить буфер обмена. Текст доступен в меню."
+            showHUD(message, seconds: 5); refresh(); return
+        }
         down.flags = .maskCommand; up.flags = .maskCommand
-        // Pasteboard providers can block the main thread too. Check immediately
-        // before sending the paste, after all AX and clipboard operations.
-        if target.element == nil, let reason = inputCounterGuard.rejection() {
+        guard token == insertionGeneration, mode == .ready else {
+            snapshot.restore(board, ifUnchanged: count)
+            return
+        }
+        // Preserve an intervening clipboard copy and detect input during the AX
+        // or pasteboard IPC before sending Cmd+V for either focus strategy.
+        let clipboardUnchanged = board.changeCount == count
+        let preparationReason = InputEventCounts.current() == preparationInput ? nil : "user_input_during_paste"
+        let postWriteReason = preparationReason
+            ?? (target.element == nil ? inputCounterGuard.rejection() : nil)
+            ?? (clipboardUnchanged ? nil : "clipboard_changed_before_paste")
+        if let reason = postWriteReason {
             snapshot.restore(board, ifUnchanged: count)
             outcome = "copy_available"
             FocusAudit.record(event: "paste_blocked", details: ["requestID": dictationAuditID,
                 "reason": reason, "target": target.metadata(), "interactionSerial": interactionSerial])
-            message = "После начала записи был ввод или переключение. Текст доступен в меню."
+            message = "Во время подготовки вставки был ввод или изменился буфер. Текст доступен в меню."
             showHUD(message, seconds: 5); refresh(); return
         }
         down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
@@ -582,13 +614,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
     }
     func startRecognizer() {
         startupDeadline?.cancel()
-        recognizer.start(audioDir: audioDir)
         let work = DispatchWorkItem { [weak self] in
             guard let self = self, !self.ready else { return }
             self.recognizer.stop()
             self.failRequest("Модель не загрузилась за 90 секунд. Перезапустите её из меню.")
         }
         startupDeadline = work; DispatchQueue.main.asyncAfter(deadline: .now() + 90, execute: work)
+        // Install the timeout before start: a synchronous launch error can then
+        // cancel it in workerEvent instead of being replaced by a false timeout.
+        recognizer.start(audioDir: audioDir)
     }
     @objc func quit() { NSApp.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) {
@@ -603,23 +637,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
         if let handler = eventHandler { RemoveEventHandler(handler) }
         if let dir = audioDir { try? FileManager.default.removeItem(at: dir) }
     }
+    func finishSelfTest(_ code: Int32) -> Never {
+        recognizer.stop()
+        if let dir = audioDir { try? FileManager.default.removeItem(at: dir) }
+        exit(code)
+    }
     func runSelfTest() {
-        guard hotkeyAvailable else { print("SELFTEST FAIL: hotkey registration"); exit(1) }
         do { try FileManager.default.copyItem(at: selfTestAudio, to: audioDir.appendingPathComponent("official-example.wav")) }
-        catch { print("SELFTEST FAIL: provide the public reference WAV with --self-test-audio /path/to/official-example.wav"); exit(1) }
+        catch { print("SELFTEST FAIL: provide the public reference WAV with --self-test-audio /path/to/official-example.wav"); finishSelfTest(1) }
         let board = NSPasteboard(name: .init("GigaFlow.selftest.\(UUID().uuidString)"))
         board.setString("original", forType: .string)
         let snapshot = ClipboardSnapshot.capture(board)!
         board.clearContents(); board.setString("temporary", forType: .string)
         snapshot.restore(board, ifUnchanged: board.changeCount)
-        guard board.string(forType: .string) == "original" else { print("SELFTEST FAIL: clipboard restoration"); exit(1) }
+        guard board.string(forType: .string) == "original" else { board.releaseGlobally(); print("SELFTEST FAIL: clipboard restoration"); finishSelfTest(1) }
         let stale = board.changeCount; board.clearContents(); board.setString("new user copy", forType: .string)
         snapshot.restore(board, ifUnchanged: stale)
-        guard board.string(forType: .string) == "new user copy" else { print("SELFTEST FAIL: clipboard race"); exit(1) }
+        guard board.string(forType: .string) == "new user copy" else { board.releaseGlobally(); print("SELFTEST FAIL: clipboard race"); finishSelfTest(1) }
         board.releaseGlobally()
-        print("SELFTEST PASS: hotkey registration and clipboard preservation")
+        print("SELFTEST PASS: private clipboard preservation")
         recognizer.start(audioDir: audioDir)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 90) { print("SELFTEST FAIL: worker timeout"); exit(1) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 90) { print("SELFTEST FAIL: worker timeout"); self.finishSelfTest(1) }
     }
 }
 
@@ -639,8 +677,50 @@ enum GigaFlowMain {
             exit(ready ? 0 : 1)
         }
         let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        var instanceLock: SingleInstanceLock?
+        if !selfTesting {
+            do {
+                guard let lock = try SingleInstanceLock.acquire() else {
+                    print("GigaFlow is already running.")
+                    return
+                }
+                instanceLock = lock
+                // Versions before 0.3.1 did not take the lock. Also detect an
+                // already launched legacy copy before registering any triggers.
+                let peers = NSRunningApplication.runningApplications(withBundleIdentifier: "local.arseniy.gigaflow")
+                    .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated }
+                let existing = peers.first { peer in
+                    // The bundle may already have been replaced on disk while
+                    // its old executable is still running. Its plist version
+                    // cannot establish that this process participates in flock.
+                    if peer.isFinishedLaunching { return true }
+                    let version = peer.bundleURL.flatMap { Bundle(url: $0) }?
+                        .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+                    if let version = version {
+                        return version.compare("0.3.1", options: .numeric) == .orderedAscending
+                    }
+                    return false
+                }
+                if let existing = existing {
+                    let alert = NSAlert()
+                    alert.messageText = "GigaFlow уже запущен"
+                    alert.informativeText = "Сначала завершите диктовку и выберите «Выйти из GigaFlow» в меню работающей копии. Затем откройте новую версию. При обновлении заменяйте приложение в прежней папке.\n\nРаботающая копия: \(existing.bundleURL?.path ?? "GigaFlow")"
+                    alert.addButton(withTitle: "Понятно")
+                    app.activate(ignoringOtherApps: true)
+                    alert.runModal()
+                    return
+                }
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Не удалось запустить GigaFlow"
+                alert.informativeText = "Не удалось проверить, что работает только одна копия приложения. \(error.localizedDescription)"
+                alert.runModal()
+                return
+            }
+        }
         let delegate = AppDelegate()
         app.delegate = delegate
-        withExtendedLifetime(delegate) { app.run() }
+        withExtendedLifetime((delegate, instanceLock)) { app.run() }
     }
 }
