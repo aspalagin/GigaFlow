@@ -595,6 +595,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
         if NSPasteboard.general.setString(lastText, forType: .string) {
             lastTextClaimed = true
             lastDictationActivity = ProcessInfo.processInfo.systemUptime
+            // Copying cancels a delayed insertion. Its processing status must
+            // not keep the updater waiting after the text has been claimed.
+            if mode == .ready && requestID == nil {
+                outcome = "copied"; message = "Текст скопирован"; refresh()
+            }
         }
     }
     @objc func showResult() {
