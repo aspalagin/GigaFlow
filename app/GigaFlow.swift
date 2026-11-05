@@ -103,7 +103,11 @@ final class Recognizer {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegate {
     typealias Mode = RecordingMode
-    var mode: Mode = .loading
+    var mode: Mode = .loading { didSet { lastDictationActivity = ProcessInfo.processInfo.systemUptime } }
+    var updates: UpdatesController?
+    var lastDictationActivity = ProcessInfo.processInfo.systemUptime
+    var lastTextClaimed = true
+    var clipboardLease: UUID?
     let recognizer = Recognizer()
     var statusItem: NSStatusItem!
     var infoItem: NSMenuItem!, toggleItem: NSMenuItem!, copyItem: NSMenuItem!
@@ -157,6 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
         startRecognizer()
         timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(timer!, forMode: .common)
+        updates?.start()
         if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized || !AXIsProcessTrusted() { showSetup(nil) }
     }
 
@@ -246,10 +251,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
         copyItem.target = self; menu.addItem(copyItem)
         for (title, action) in [("Показать последний текст…", #selector(showResult)),
                                 ("Настройка и разрешения…", #selector(showSetup(_:))),
-                                ("Перезапустить модель", #selector(restartWorker)),
-                                ("Выйти из GigaFlow", #selector(quit))] {
+                                ("Перезапустить модель", #selector(restartWorker))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
         }
+        menu.addItem(.separator())
+        updates = UpdatesController(menu: menu, enabled: usesBundledRuntime) { [weak self] in
+            guard let self = self else {
+                return UpdateSafetyState(mode: .loading, hasPendingRequest: true, clipboardInUse: true,
+                    hasUnclaimedText: true, secondsSinceActivity: 0, systemIdleSeconds: 0)
+            }
+            return UpdateSafetyState(mode: self.mode,
+                hasPendingRequest: self.requestID != nil || self.outcome == "processing",
+                clipboardInUse: self.clipboardLease != nil,
+                hasUnclaimedText: !self.lastText.isEmpty && !self.lastTextClaimed,
+                secondsSinceActivity: ProcessInfo.processInfo.systemUptime - self.lastDictationActivity,
+                systemIdleSeconds: CGEventSource.secondsSinceLastEventType(.combinedSessionState,
+                    eventType: CGEventType(rawValue: UInt32.max)!))
+        }
+        menu.addItem(.separator())
+        let quitItem = NSMenuItem(title: "Выйти из GigaFlow", action: #selector(quit), keyEquivalent: "")
+        quitItem.target = self; menu.addItem(quitItem)
         menu.autoenablesItems = false
         statusItem.menu = menu
         refresh()
@@ -304,6 +325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastPermissionCheck >= 1 else { return }
         lastPermissionCheck = now
+        updates?.tick()
         let mic = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         let ax = AXIsProcessTrusted()
         setupStatus?.stringValue = "\(mic ? "✓" : "○") Микрофон   ·   \(ax ? "✓" : "○") Вставка текста\n\(message)"
@@ -314,6 +336,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
             "primaryHotkey": primaryHotKey != nil, "f18Hotkey": hotKey != nil,
             "completedDictations": completedDictations, "lastOutcome": outcome,
             "triggerCount": triggerCount, "message": message,
+            "updateStatus": updates?.status ?? "disabled",
+            "appBuild": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
             "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"]
         if let data = try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]), data != previousStatus {
             let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/GigaFlow")
@@ -334,7 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
     }
 
     func startRecording() {
-        guard mode == .ready else { return }
+        guard mode == .ready, updates?.isInstalling != true else { return }
         insertionGeneration = UUID()
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
             message = "Нужно разрешение на микрофон"; refresh(); showSetup(nil); return
@@ -464,7 +488,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
             let destination = target
             resetAudio(); mode = .ready; target = nil
             if text.isEmpty { outcome = "empty_audio"; message = "Речь не обнаружена"; showHUD(message, seconds: 3); refresh(); return }
-            completedDictations += 1; lastText = text; refresh()
+            completedDictations += 1; lastText = text; lastTextClaimed = false; refresh()
             let token = UUID(); insertionGeneration = token
             insert(text, target: destination, token: token)
         }
@@ -551,18 +575,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVAudioRecorderDelegat
         }
         down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
         outcome = "paste_sent"
+        lastTextClaimed = true
         FocusAudit.record(event: "paste_sent", details: ["requestID": dictationAuditID,
             "target": target.metadata(), "interactionSerial": interactionSerial])
         let restore = { snapshot.restore(board, ifUnchanged: count) }
         pasteRestore = restore
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { restore() }
+        let lease = UUID(); clipboardLease = lease
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            restore()
+            if self?.clipboardLease == lease { self?.clipboardLease = nil }
+        }
         message = "Текст передан в поле · готово"; showHUD("Готово", seconds: 1.5); refresh()
     }
 
     @objc func copyLast() {
         insertionGeneration = UUID()
         guard !lastText.isEmpty else { return }
-        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(lastText, forType: .string)
+        NSPasteboard.general.clearContents()
+        if NSPasteboard.general.setString(lastText, forType: .string) {
+            lastTextClaimed = true
+            lastDictationActivity = ProcessInfo.processInfo.systemUptime
+        }
     }
     @objc func showResult() {
         guard !lastText.isEmpty else { return }

@@ -6,6 +6,7 @@ samples/
 results/
 build/
 dist/
+vendor/
 previous/
 *.app/
 *.dmg
@@ -22,6 +23,8 @@ previous/
 
 # Signing material must remain on the owner's Mac
 Signing/
+UpdateSigning/
+private-key.base64
 *.keychain*
 *.p12
 *.pfx

@@ -10,9 +10,12 @@
 | gigaam-mlx, aystream | Реализация GigaAM для MLX | [MIT](https://github.com/aystream/gigaam-mlx/blob/20276ddd6173d636b37c6c6e13b4ee8f7b94d1ac/LICENSE), [исходники закреплённой версии](https://github.com/aystream/gigaam-mlx/tree/20276ddd6173d636b37c6c6e13b4ee8f7b94d1ac) |
 | GigaAM-v3-e2e-rnnt-mlx, aystream | Веса и токенизатор RNNT | [Карточка закреплённой модели](https://huggingface.co/aystream/GigaAM-v3-e2e-rnnt-mlx/tree/decfca492069ea30fb5ead79c4516d50c16d93ea), лицензия MIT GigaAM включена рядом с моделью |
 | MLX, Apple | Вычисления на Apple Silicon | [MIT](https://github.com/ml-explore/mlx/blob/main/LICENSE), [проект](https://github.com/ml-explore/mlx) |
+| Sparkle 2.10.1 | Проверка, загрузка и установка подписанных обновлений | [MIT и уведомления о включённых компонентах](https://github.com/sparkle-project/Sparkle/blob/2.10.1/LICENSE), [закреплённый выпуск](https://github.com/sparkle-project/Sparkle/releases/tag/2.10.1) |
 | Hammerspoon | Необязательная привязка кнопки мыши; само приложение Hammerspoon не входит в DMG | [MIT](https://github.com/Hammerspoon/hammerspoon/blob/master/LICENSE), [проект](https://www.hammerspoon.org/) |
 
 ## Уведомления о лицензиях в готовом приложении
+
+`GigaFlow.app/Contents/Resources/Licenses/Sparkle.txt` содержит полный оригинальный `LICENSE` дистрибутива Sparkle с уведомлениями его компонентов. Сам framework и его вспомогательные приложения находятся в `Contents/Frameworks/Sparkle.framework`; инструменты издателя в приложение не включаются.
 
 В `GigaFlow.app/Contents/Resources/Runtime` сохранены:
 
@@ -26,6 +29,7 @@
 
 Для воспроизводимости закреплены:
 
+- Sparkle `2.10.1`, SHA256 официального архива `1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27`; [скрипт загрузки](scripts/fetch-sparkle.sh) проверяет его до распаковки.
 - CPython `3.11.18`, python-build-standalone `20261026`, `aarch64-apple-darwin`.
 - `gigaam-mlx`: commit `20276ddd6173d636b37c6c6e13b4ee8f7b94d1ac`.
 - `aystream/GigaAM-v3-e2e-rnnt-mlx`: revision `decfca492069ea30fb5ead79c4516d50c16d93ea`.
