@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 @main
 enum FocusPolicyChecks {
@@ -71,6 +72,21 @@ enum FocusPolicyChecks {
         counters("unused allowance rejects", baseline, baseline, InputEventCounts(keys: 1), false)
         counters("UInt32 counter wrap", InputEventCounts(), InputEventCounts(left: UInt32.max),
                  InputEventCounts(left: 1), true)
+        func shortcut(_ name: String, _ keyCode: UInt16, _ flags: NSEvent.ModifierFlags,
+                      _ primary: Bool, _ f18: Bool, _ expected: Bool) {
+            precondition(DictationShortcut.matches(keyCode: keyCode, flags: flags,
+                primaryAvailable: primary, f18Available: f18) == expected, name)
+            checked += 1
+        }
+        shortcut("registered Ctrl Shift Space", 49, [.control, .shift], true, true, true)
+        shortcut("ordinary space is navigation", 49, [], true, true, false)
+        shortcut("extra Command is navigation", 49, [.control, .shift, .command], true, true, false)
+        shortcut("missing Shift is navigation", 49, [.control], true, true, false)
+        shortcut("unregistered primary is navigation", 49, [.control, .shift], false, true, false)
+        shortcut("Caps Lock does not alter the shortcut", 49, [.control, .shift, .capsLock], true, true, true)
+        shortcut("registered F18", 79, [], true, true, true)
+        shortcut("unregistered F18 is navigation", 79, [], true, false, false)
+        shortcut("modified F18 is navigation", 79, [.control], true, true, false)
         print("Focus policy: \(checked) checks passed")
     }
 }

@@ -1,0 +1,7 @@
+{
+  "artifact": "cpython-3.11.18+20261026-aarch64-apple-darwin-pgo+lto-full.tar.zst",
+  "artifact_sha256": "4e1e6570f461bfbd051a9774a2a14613c5014dfda0be9cb402597b51e7dc4b3b",
+  "source": "https://github.com/astral-sh/python-build-standalone/releases/tag/20261026",
+  "python_version": "3.11.18",
+  "build": "20261026"
+}

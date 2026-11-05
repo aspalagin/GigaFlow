@@ -4,7 +4,7 @@ repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_dir"
 test_python="${GIGAFLOW_TEST_PYTHON:-python3}"
 "$test_python" -m unittest discover -s app/tests -v
-"$test_python" -m py_compile app/worker.py app/setup-signing.py app/sign-app.py scripts/download-model.py
+"$test_python" -m py_compile app/worker.py app/setup-signing.py app/sign-app.py scripts/download-model.py scripts/bundle-runtime.py
 for script in app/build.sh app/enable-signing-trust.command scripts/*.sh; do
   bash -n "$script"
 done

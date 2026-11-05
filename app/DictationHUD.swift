@@ -7,8 +7,8 @@ final class DictationHUDView: NSView {
     var onCancel: (() -> Void)?
     // A preference lets later size changes avoid rebuilding the signed app.
     private let displayScale: CGFloat = {
-        let configured = UserDefaults.standard.object(forKey: "HUDScale") as? Double ?? (1.0 / 3.0)
-        return CGFloat(configured.isFinite ? min(1, max(0.15, configured)) : (1.0 / 3.0))
+        let configured = UserDefaults.standard.object(forKey: "HUDScale") as? Double ?? (2.0 / 3.0)
+        return CGFloat(configured.isFinite ? min(1, max(0.15, configured)) : (2.0 / 3.0))
     }()
 
     private var state = "info"

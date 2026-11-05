@@ -74,7 +74,7 @@ def install(verify_only: bool = False) -> None:
             repo_id=REPOSITORY,
             revision=REVISION,
             local_dir=staging,
-            allow_patterns=list(FILES),
+            allow_patterns=list(FILES) + ["README.md"],
             token=False,
         )
         record = {"repository": REPOSITORY, "revision": REVISION, "files": file_manifest(staging)}

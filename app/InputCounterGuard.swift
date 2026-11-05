@@ -1,5 +1,16 @@
 import AppKit
 import CoreGraphics
+import Carbon
+
+/// Only registered dictation shortcuts are exempt from navigation detection.
+enum DictationShortcut {
+    static func matches(keyCode: UInt16, flags: NSEvent.ModifierFlags,
+                        primaryAvailable: Bool, f18Available: Bool) -> Bool {
+        let modifiers = flags.intersection([.command, .control, .option, .shift])
+        if f18Available && keyCode == UInt16(kVK_F18) && modifiers.isEmpty { return true }
+        return primaryAvailable && keyCode == UInt16(kVK_Space) && modifiers == [.control, .shift]
+    }
+}
 
 /// Aggregate system counters, never key codes, characters or field contents.
 /// These counters advance even while the main thread is waiting for an AX reply.
@@ -35,7 +46,7 @@ final class InputCounterGuard {
     }
 
     // Called only for a Carbon-confirmed dictation hotkey press after capture.
-    func allowF18Press() {
+    func allowHotKeyPress() {
         guard baseline != nil else { return }
         allowed.keys &+= 1
     }
