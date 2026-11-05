@@ -1,0 +1,46 @@
+# Local runtime, models, recordings and build output
+.venv/
+venv/
+models/
+samples/
+results/
+build/
+dist/
+previous/
+*.app/
+*.dmg
+*.pkg
+*.safetensors
+*.onnx
+*.wav
+*.caf
+*.aiff
+*.flac
+*.log
+*.tar.gz
+*.zip
+
+# Signing material must remain on the owner's Mac
+Signing/
+*.keychain*
+*.p12
+*.pfx
+*.pem
+*.key
+identity.json
+keychain-password.txt
+trust-result.txt
+.env
+.env.*
+
+# Local diagnostics and editor state
+status.json
+focus-events.json
+focus-probe.jsonl
+installation.json
+*-validation-report.json
+__pycache__/
+*.py[cod]
+.DS_Store
+.idea/
+.vscode/
