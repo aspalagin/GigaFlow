@@ -19,6 +19,7 @@ trap cleanup EXIT
 if [[ ! -f "$archive" ]]; then
   download=$(mktemp "$vendor/.sparkle-download.XXXXXX")
   curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' \
+    --retry 3 --retry-delay 2 --retry-max-time 300 \
     --connect-timeout 20 --max-time 300 \
     "https://github.com/sparkle-project/Sparkle/releases/download/$version/Sparkle-$version.tar.xz" \
     --output "$download"
